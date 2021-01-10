@@ -799,6 +799,7 @@ ngx_mail_proxy_read_response(ngx_mail_session_t *s, ngx_uint_t state)
     ssize_t                 n;
     ngx_buf_t              *b;
     ngx_mail_proxy_conf_t  *pcf;
+    int                     expect_chunk;
 
     s->connection->log->action = "reading response from upstream";
 
@@ -833,6 +834,7 @@ ngx_mail_proxy_read_response(ngx_mail_session_t *s, ngx_uint_t state)
         return NGX_AGAIN;
     }
 
+    expect_chunk = 0;
     p = b->pos;
 
     switch (s->protocol) {
@@ -860,10 +862,35 @@ ngx_mail_proxy_read_response(ngx_mail_session_t *s, ngx_uint_t state)
             break;
 
         case ngx_imap_passwd:
-            if (ngx_strncmp(p, s->tag.data, s->tag.len) == 0) {
-                p += s->tag.len;
-                if (p[0] == 'O' && p[1] == 'K') {
-                    return NGX_OK;
+            while ((p != NULL) && (p < b->last))
+            {
+                if (ngx_strncmp(p, s->tag.data, s->tag.len) == 0) {
+                    expect_chunk = 0;
+                    p += s->tag.len;
+                    if (p[0] == 'O' && p[1] == 'K') {
+                        return NGX_OK;
+                    }
+                }
+                else {
+                    /* be prepared to handle (optional) untagged (capability)
+                       response before the tagged result to the login command 
+                       (rfc 3501, section 6.2.3)
+                     */
+
+                    /* it is safe to search for a \n because the check for 
+                       b->last[-1,-2] against CRLF has already been done
+                     */
+                    p = (u_char *)strstr ((char *)p, "\n");
+                    if (!p)
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        /* advance beyond the newline */
+                        expect_chunk = 1;
+                        ++p;
+                    }
                 }
             }
             break;
@@ -939,6 +966,17 @@ ngx_mail_proxy_read_response(ngx_mail_session_t *s, ngx_uint_t state)
         }
 
         break;
+    }
+
+    if (expect_chunk == 1)
+    {
+        /* expect_chunk can only be 1 if the response to the 
+           LOGIN command contained an optional (untagged)
+           capability response, followed by the tagged result 
+           (OK or NO), in separate TCP packets which require more
+           than one call to recv()
+         */
+        return NGX_AGAIN;
     }
 
     pcf = ngx_mail_get_module_srv_conf(s, ngx_mail_proxy_module);
